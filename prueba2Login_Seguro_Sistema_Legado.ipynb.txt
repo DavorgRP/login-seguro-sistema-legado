@@ -1,0 +1,168 @@
+import hashlib
+import hmac
+import os
+import re
+import sqlite3
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+ITERACIONES = 100_000
+MAX_INTENTOS = 3
+PATRON_CORREO = r"^[\w.+-]+@[\w-]+(\.[\w-]+)*\.[a-zA-Z]{2,}$"
+
+legado = [
+    {"usuario": "osmith", "correo": "oliver.smith@tienda.com", "clave": "Oliver2024"},
+    {"usuario": "msuarez", "correo": "mauricio.suarez@tienda.com", "clave": "Camba1234"},
+    {"usuario": "ebrown", "correo": "emily.brown@tienda", "clave": "Emily2025"},  # correo inválido
+    {"usuario": "jroca", "correo": "jimena.roca@tienda.com", "clave": "123"},      # clave corta
+    {"usuario": "osmith", "correo": "otro.smith@tienda.com", "clave": "Repetido99"}, # usuario repetido
+    {"usuario": "hwilliams", "correo": "harry.williams@tienda.com", "clave": "Harry7890"},
+    {"usuario": "", "correo": "sin.usuario@tienda.com", "clave": "Vacio1234"},    # usuario vacío
+]
+
+print(f"Registros en el sistema legado: {len(legado)}")
+
+
+def generar_hash(clave, sal=None):
+    # Convierte la contraseña en un hash con sal. La contraseña original nunca se guarda.
+    if sal is None:
+        sal = os.urandom(16)  # sal aleatoria y distinta para cada usuario
+    hash_clave = hashlib.pbkdf2_hmac('sha256', clave.encode('utf-8'), sal, ITERACIONES)
+    return sal.hex(), hash_clave.hex()
+
+def verificar_clave(clave, sal_hex, hash_guardado):
+    # Calcula el hash de la clave ingresada y lo compara con el guardado.
+    _, hash_nuevo = generar_hash(clave, bytes.fromhex(sal_hex))
+    return hmac.compare_digest(hash_nuevo, hash_guardado)
+
+def validar_registro(registro, usuarios_vistos):
+    # Devuelve una lista de errores. Si está vacía, el registro es válido.
+    errores = []
+    
+    # Mejora: Uso de .get() evita KeyError si el diccionario legado viene incompleto
+    usuario = registro.get("usuario", "").strip()
+    correo = registro.get("correo", "").strip()
+    clave = registro.get("clave", "")
+
+    if not usuario:
+        errores.append("usuario vacío")
+    elif usuario in usuarios_vistos:
+        errores.append("usuario repetido")
+
+    if not re.match(PATRON_CORREO, correo):
+        errores.append("correo con formato inválido")
+
+    if len(clave) < 8:
+        errores.append("contraseña con menos de 8 caracteres")
+    elif not re.search(r"\d", clave):
+        errores.append("contraseña sin números")
+
+    return errores
+
+# Mejora: El bloque 'with' asegura que la conexión se cierre o haga rollback ante fallos
+with sqlite3.connect("sistema_seguro.db") as conexion:
+    cursor = conexion.cursor()
+    cursor.execute("DROP TABLE IF EXISTS usuarios")
+    cursor.execute("""
+        CREATE TABLE usuarios (
+            usuario TEXT NOT NULL,
+            correo TEXT NOT NULL,
+            sal TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            intentos INTEGER NOT NULL DEFAULT 0,
+            bloqueado INTEGER NOT NULL DEFAULT 0,
+            CONSTRAINT pk_usuarios PRIMARY KEY (usuario),
+            CONSTRAINT ck_usuarios_intentos CHECK (intentos >= 0),
+            CONSTRAINT ck_usuarios_bloqueado CHECK (bloqueado IN (0, 1))
+        )
+    """)
+
+    usuarios_vistos = set()
+    migrados = 0
+    rechazados = 0
+
+    print("\n=== REPORTE DE MIGRACIÓN ===\n")
+
+    for registro in legado:
+        nombre = registro.get("usuario", "").strip() or "(vacío)"
+        errores = validar_registro(registro, usuarios_vistos)
+        
+        if errores:
+            rechazados += 1
+            print(f"❌ {nombre}: {', '.join(errores)}")
+            continue
+
+        sal, hash_clave = generar_hash(registro["clave"])
+        
+        cursor.execute(
+            "INSERT INTO usuarios (usuario, correo, sal, hash) VALUES (?, ?, ?, ?)",
+            (registro["usuario"].strip(), registro["correo"].strip(), sal, hash_clave)
+        )
+        usuarios_vistos.add(registro["usuario"].strip())
+        migrados += 1
+        print(f"✅ {nombre}: migrado | contraseña: ********")
+
+    conexion.commit()
+
+    print(f"\nMigrados: {migrados} | Rechazados: {rechazados}\n")
+    print(f"{'Usuario':<10} | {'Correo':<27} | {'Hash (inicio)':<23} | Intentos | Bloqueado")
+    print("-" * 85)
+    
+    for usuario, correo, hash_clave, intentos, bloqueado in cursor.execute(
+        "SELECT usuario, correo, hash, intentos, bloqueado FROM usuarios"
+    ):
+        print(f"{usuario:<10} | {correo:<27} | {hash_clave[:20]}... | {intentos:^8} | {bloqueado:^9}")
+
+titulo = widgets.HTML("🔐 <b>INICIO DE SESIÓN</b>")
+txt_usuario = widgets.Text(description="Usuario:")
+txt_clave = widgets.Password(description="Contraseña:")
+btn_ingresar = widgets.Button(description="Ingresar", button_style="success", icon="sign-in")
+salida = widgets.Output()
+
+def iniciar_sesion(b):
+    with salida:
+        clear_output()
+        usuario = txt_usuario.value.strip()
+        clave = txt_clave.value
+        txt_clave.value = ""  # Limpieza inmediata por seguridad
+        
+        if not usuario or not clave:
+            print("⚠️ Completa usuario y contraseña.")
+            return
+
+        # Reconexión segura para la consulta interactiva
+        with sqlite3.connect("sistema_seguro.db") as db_login:
+            cur = db_login.cursor()
+            cur.execute("SELECT sal, hash, intentos, bloqueado FROM usuarios WHERE usuario = ?", (usuario,))
+            fila = cur.fetchone()
+
+            if fila is None:
+                print("❌ Usuario o contraseña incorrectos.")
+                return
+
+            sal, hash_guardado, intentos, bloqueado = fila
+
+            if bloqueado:
+                print("🔒 Cuenta bloqueada por demasiados intentos fallidos.")
+                return
+
+            if verificar_clave(clave, sal, hash_guardado):
+                cur.execute("UPDATE usuarios SET intentos = 0 WHERE usuario = ?", (usuario,))
+                db_login.commit()
+                print(f"✅ Bienvenido, {usuario}.")
+            else:
+                intentos += 1
+                bloquear = 1 if intentos >= MAX_INTENTOS else 0
+                cur.execute(
+                    "UPDATE usuarios SET intentos = ?, bloqueado = ? WHERE usuario = ?",
+                    (intentos, bloquear, usuario)
+                )
+                db_login.commit()
+                
+                if bloquear:
+                    print("🔒 Cuenta bloqueada por demasiados intentos fallidos.")
+                else:
+                    print("❌ Usuario o contraseña incorrectos.")
+
+btn_ingresar.on_click(iniciar_sesion)
+display(titulo, txt_usuario, txt_clave, btn_ingresar, salida)
