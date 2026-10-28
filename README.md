@@ -14,6 +14,6 @@ y guarda las contraseñas como hash con sal.
 - Login con bloqueo después de 3 intentos fallidos.
 
 ## Cómo probarlo
-[Abrir en Google Colab](https://colab.research.google.com/github/DavorgRP/login-seguro-sistema-legado/blob/main/Login_Seguro_Sistema_Legado.ipynb)
+[Abrir en Google Colab](https://colab.research.google.com/github/DavorgRP/Login_Seguro_Sistema_Legado.ipynb)
 
 Ejecuta las celdas en orden, de la 1 a la 6.
